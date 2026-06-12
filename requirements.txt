@@ -1,0 +1,9 @@
+# Runtime deps for analysis/grading (GPU generation additionally needs vllm;
+# see scripts/setup_box.sh). Prefer `pip install -e ".[dev]"`.
+numpy>=1.26
+pyyaml>=6
+datasets>=2.19
+math-verify[antlr4_13_2]>=0.6
+pebble>=5.0
+matplotlib>=3.8
+huggingface_hub>=0.23
