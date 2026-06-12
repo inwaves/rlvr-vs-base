@@ -3,6 +3,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+mkdir -p runs/logs
+LOG="runs/logs/setup_box-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$LOG") 2>&1
+echo "Logging to $LOG"
+
 python -m pip install -U pip
 pip install -e ".[dev]"
 pip install vllm

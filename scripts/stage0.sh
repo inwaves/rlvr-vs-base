@@ -4,6 +4,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 CFG=configs/experiment.yaml
 
+mkdir -p runs/logs
+LOG="runs/logs/$(basename "$0" .sh)-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$LOG") 2>&1
+echo "Logging to $LOG"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi --query-gpu=timestamp,utilization.gpu,memory.used,memory.total,power.draw \
+    --format=csv,noheader -l 30 >> runs/logs/gpu.csv &
+  GPU_LOG_PID=$!
+  trap 'kill "$GPU_LOG_PID" 2>/dev/null || true' EXIT
+fi
+
 for model in base rl; do
   python -m rlvr_vs_base.generate --config "$CFG" --model "$model" \
     --benchmark math500,aime24,aime25 --stage pilot

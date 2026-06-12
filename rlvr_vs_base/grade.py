@@ -20,8 +20,9 @@ import os
 import re
 from pathlib import Path
 
-from .config import gens_dir, graded_dir, load_config
+from .config import gens_dir, graded_dir, load_config, runs_root
 from .data import load_benchmark
+from .status import write_status
 
 ANSWER_LINE_RE = re.compile(r"(?im)^[ \t]*Answer[ \t]*:[ \t]*(.+?)[ \t]*$")
 ANSWER_DECOR_RE = re.compile(r"(?im)^[ \t>#*_]*Answer[ \t]*\**[ \t]*:[ \t]*\**[ \t]*(.+?)[ \t]*$")
@@ -153,6 +154,7 @@ def main() -> None:
     template = args.template or cfg["prompt"]["template"]
     timeout = cfg["grading"]["timeout_seconds"]
     workers = cfg["grading"]["workers"] or os.cpu_count()
+    rr = runs_root(cfg)
 
     for benchmark in [b.strip() for b in args.benchmark.split(",")]:
         golds = {r["problem_id"]: r["answer"] for r in load_benchmark(cfg, benchmark)}
@@ -173,6 +175,18 @@ def main() -> None:
             print(
                 f"{benchmark}/{args.model}: graded {shard.name} "
                 f"({stats['correct']}/{stats['samples']} correct)"
+            )
+            write_status(
+                rr,
+                {
+                    "phase": "grade",
+                    "benchmark": benchmark,
+                    "model": args.model,
+                    "template": template,
+                    "shards_done": done,
+                    "shards_total": len(shards),
+                    "last_shard": shard.name,
+                },
             )
         print(f"{benchmark}/{args.model}: {done} shards graded, {skipped} already done")
 

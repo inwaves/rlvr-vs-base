@@ -21,6 +21,7 @@ sampling:
   temperature: 0.6        # paper parity
   top_p: 0.95             # paper parity
   chunk_n: 16             # samples requested per prompt per vLLM round
+  prompts_per_call: 64    # prompts per llm.generate call; bounds heartbeat staleness and preemption loss
   base_seed: 1
 
 benchmarks:

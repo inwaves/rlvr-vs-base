@@ -22,9 +22,10 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import gens_dir, load_config, subset_path
+from .config import gens_dir, load_config, runs_root, subset_path
 from .data import load_benchmark
 from .prompts import render
+from .status import write_status
 
 
 def count_existing(dirpath: Path) -> dict[str, int]:
@@ -116,21 +117,33 @@ def write_shard(outdir: Path, records: list[dict]) -> Path:
     return final
 
 
-def run_generation(llm, plan, model_key, hf_id, template, scfg, engine_seed):
-    """Generate the deficit for one benchmark plan using an existing engine."""
+def run_generation(llm, plan, model_key, hf_id, template, scfg, engine_seed, rr):
+    """Generate the deficit for one benchmark plan using an existing engine.
+
+    Work is issued in groups of at most `prompts_per_call` prompts so that a
+    shard lands and the heartbeat updates every few minutes — this bounds
+    both data loss on preemption and heartbeat staleness for monitoring.
+    """
     from vllm import SamplingParams
 
     bcfg = plan["bcfg"]
+    benchmark = plan["benchmark"]
     deficits = dict(plan["deficits"])
     prompts_by_pid = {p["problem_id"]: render(template, p["problem"]) for p in plan["problems"]}
     chunk_n = scfg["chunk_n"]
+    group_size = scfg.get("prompts_per_call", 64)
     total_new = sum(deficits.values())
     done = 0
     t0 = time.time()
 
-    while any(v > 0 for v in deficits.values()):
-        batch_pids = [pid for pid, d in deficits.items() if d > 0]
-        batch_prompts = [prompts_by_pid[pid] for pid in batch_pids]
+    while True:
+        pending = [pid for pid, d in deficits.items() if d > 0]
+        if not pending:
+            break
+        # Largest deficits first so coverage stays even across problems.
+        pending.sort(key=lambda pid: -deficits[pid])
+        group = pending[:group_size]
+        t_grp = time.time()
         batch_params = [
             SamplingParams(
                 n=min(chunk_n, deficits[pid]),
@@ -138,12 +151,12 @@ def run_generation(llm, plan, model_key, hf_id, template, scfg, engine_seed):
                 top_p=scfg["top_p"],
                 max_tokens=bcfg["max_tokens"],
             )
-            for pid in batch_pids
+            for pid in group
         ]
-        outs = llm.generate(batch_prompts, batch_params)
+        outs = llm.generate([prompts_by_pid[pid] for pid in group], batch_params)
         records = []
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        for pid, out in zip(batch_pids, outs):
+        for pid, out in zip(group, outs):
             for comp in out.outputs:
                 records.append(
                     {
@@ -154,7 +167,7 @@ def run_generation(llm, plan, model_key, hf_id, template, scfg, engine_seed):
                         "completion_tokens": len(comp.token_ids),
                         "model": hf_id,
                         "model_key": model_key,
-                        "benchmark": plan["benchmark"],
+                        "benchmark": benchmark,
                         "template": template,
                         "engine_seed": engine_seed,
                         "temperature": scfg["temperature"],
@@ -166,11 +179,37 @@ def run_generation(llm, plan, model_key, hf_id, template, scfg, engine_seed):
             deficits[pid] -= len(out.outputs)
         write_shard(plan["outdir"], records)
         done += len(records)
-        toks = sum(r["completion_tokens"] for r in records)
-        dt = time.time() - t0
+
+        # Telemetry + quality canaries for this group.
+        grp_toks = sum(r["completion_tokens"] for r in records)
+        grp_dt = max(time.time() - t_grp, 1e-9)
+        cap_pct = 100 * sum(1 for r in records if r["finish_reason"] == "length") / len(records)
+        empty_pct = 100 * sum(1 for r in records if len(r["text"].strip()) < 5) / len(records)
+        elapsed = max(time.time() - t0, 1e-9)
+        eta_min = (total_new - done) / max(done / elapsed, 1e-9) / 60
         print(
-            f"[{plan['benchmark']}/{model_key}] {done}/{total_new} samples "
-            f"({toks} tokens this round, {done / max(dt, 1):.1f} samples/s cumulative)"
+            f"[{benchmark}/{model_key}] {done}/{total_new} samples | "
+            f"{grp_toks / grp_dt:,.0f} tok/s | cap-hit {cap_pct:.1f}% | ETA {eta_min:.0f} min"
+        )
+        if cap_pct > 10:
+            print(f"WARN [{benchmark}/{model_key}] cap-hit {cap_pct:.1f}% this group — check max_tokens (gate G2)")
+        if empty_pct > 2:
+            print(f"WARN [{benchmark}/{model_key}] {empty_pct:.1f}% near-empty completions — check prompt/template")
+        write_status(
+            rr,
+            {
+                "phase": "generate",
+                "benchmark": benchmark,
+                "model": model_key,
+                "template": template,
+                "samples_done": done,
+                "samples_total": total_new,
+                "group_tok_per_s": round(grp_toks / grp_dt),
+                "cap_hit_pct_group": round(cap_pct, 1),
+                "empty_pct_group": round(empty_pct, 1),
+                "eta_min": round(eta_min),
+                "engine_seed": engine_seed,
+            },
         )
 
 
@@ -226,6 +265,8 @@ def main() -> None:
 
     engine_seed = args.seed if args.seed is not None else int(time.time()) % 1_000_000
     max_len = max(pl["bcfg"]["max_tokens"] for pl in plans) + 1024
+    rr = runs_root(cfg)
+    write_status(rr, {"phase": "engine_loading", "model": args.model, "hf_id": hf_id, "benchmarks": benchmarks})
 
     from vllm import LLM
 
@@ -239,7 +280,8 @@ def main() -> None:
         tensor_parallel_size=args.tensor_parallel_size,
     )
     for pl in plans:
-        run_generation(llm, pl, args.model, hf_id, template, scfg, engine_seed)
+        run_generation(llm, pl, args.model, hf_id, template, scfg, engine_seed, rr)
+    write_status(rr, {"phase": "idle", "note": "generation complete", "model": args.model, "benchmarks": benchmarks})
     print("Generation complete.")
 
 

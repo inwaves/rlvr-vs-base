@@ -141,7 +141,40 @@ bash scripts/stage2.sh
 ```
 
 Every stage is resumable: generation counts existing samples per problem
-and only fills the deficit, so a preempted box loses at most one round.
+and only fills the deficit, so a preempted box loses at most one group of
+samples. Run stages inside tmux/screen on the box; poll progress from a
+second shell with `bash scripts/watch.sh`.
+
+## Observability
+
+Designed so the operator can tell at a glance whether the run is healthy,
+stuck, or producing garbage — without interrupting it:
+
+- **Heartbeat** (`runs/status.json`): rewritten atomically after every
+  generation group (~5-10 min at stage-1 scale; `prompts_per_call` bounds
+  this) and every graded shard. Fields: phase, benchmark/model, samples
+  done/total, group tok/s, cap-hit %, near-empty %, ETA, disk free.
+  `python -m rlvr_vs_base.status` pretty-prints it and flags a stale
+  heartbeat (>20 min in an active phase = engine wedged; kill and re-run,
+  resume handles the rest).
+- **Quality canaries**: each group prints WARN lines when cap-hit rate
+  exceeds 10% (max_tokens too low — gate G2 territory) or near-empty
+  completions exceed 2% (prompt/template breakage). These catch a broken
+  run within minutes, before a stage budget is burned.
+- **Logs**: every stage script tees all output (including vLLM progress
+  bars and engine errors) to `runs/logs/<stage>-<timestamp>.log`, so
+  postmortems survive terminal scrollback.
+- **GPU telemetry**: stage scripts background a 30s `nvidia-smi` CSV logger
+  into `runs/logs/gpu.csv` — utilization/memory/power history for
+  diagnosing throughput regressions.
+- **`bash scripts/watch.sh`**: heartbeat + latest log tail + GPU snapshot
+  in one command.
+
+Failure playbook: engine hang → stale heartbeat → kill, re-run stage
+(resumes). CUDA OOM at startup → lower `--gpu-memory-utilization`. OOM
+mid-run → kill, lower, re-run (resumes). Persistent WARN canaries → stop,
+inspect a shard with `zcat runs/<bench>/<model>/gens/*/shard-*.jsonl.gz | head`,
+fix, resume.
 
 ## Estimator note (adaptive N)
 
