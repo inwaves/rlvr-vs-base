@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rlvr-vs-base"
+version = "0.1.0"
+description = "Budget-constrained replication of the pass@k crossover (arXiv:2504.13837) on OLMo 3 Base vs RL-Zero-Math"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.26",
+  "pyyaml>=6",
+  "datasets>=2.19",
+  "math-verify[antlr4_13_2]>=0.6",
+  "pebble>=5.0",
+  "matplotlib>=3.8",
+  "huggingface_hub>=0.23",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "jinja2>=3.1"]
+# vllm is installed separately on the GPU box (scripts/setup_box.sh);
+# it is not needed for tests or analysis.
+
+[tool.setuptools.packages.find]
+include = ["rlvr_vs_base*"]

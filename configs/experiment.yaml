@@ -1,0 +1,64 @@
+# Single source of truth for the pass@k replication.
+# Protocol parity targets Yue et al., arXiv 2504.13837 (see README parity matrix).
+# Budget: $100 all-in; staged adaptive sampling (see kb replication plan).
+
+models:
+  base:
+    hf_id: allenai/Olmo-3-1025-7B
+    label: Olmo-3-7B-Base
+  rl:
+    hf_id: allenai/Olmo-3.1-7B-RL-Zero-Math
+    label: Olmo-3.1-7B-RL-Zero-Math
+    # Lineage verified via HF metadata (2026-06-12): finetuned from allenai/Olmo-3-1025-7B
+    # on allenai/Dolci-RL-Zero-Math-7B (RLVR, no SFT in between). The 3.1 refresh is the
+    # longer, more stable RL run. Alternative (original, shorter run): allenai/Olmo-3-7B-RL-Zero-Math.
+
+prompt:
+  template: rlzero_math   # exact RL Zero training serialization; see rlvr_vs_base/prompts.py
+  ablation_template: boxed  # one prompt-variant ablation, math500_hard at small N
+
+sampling:
+  temperature: 0.6        # paper parity
+  top_p: 0.95             # paper parity
+  chunk_n: 16             # samples requested per prompt per vLLM round
+  prompts_per_call: 64    # prompts per llm.generate call; bounds heartbeat staleness and preemption loss
+  base_seed: 1
+
+benchmarks:
+  math500:
+    dataset: HuggingFaceH4/MATH-500
+    split: test
+    expected_count: 500
+    max_tokens: 8192      # budget deviation from the paper's 16384; pilot-gated (README gate G2)
+    stages: {pilot: 16, main: 128, extension: 256}
+    main_subset: math500_hard   # stage 'main' runs on the selected subset only
+  aime24:
+    dataset: HuggingFaceH4/aime_2024
+    split: train
+    expected_count: 30
+    max_tokens: 16384     # paper parity
+    stages: {pilot: 32, main: 256, extension: 1024}
+  aime25:
+    dataset: yentinglin/aime_2025
+    split: train
+    expected_count: 30
+    max_tokens: 16384
+    stages: {pilot: 32}   # deferred beyond pilot (budget cut; second wave)
+
+subset:
+  math500_hard:
+    accuracy_threshold: 0.5   # keep problems where EITHER model's pilot accuracy < 0.5 (symmetric rule)
+    target_size: 250
+    stratify_by: level        # top-up draw stratified by MATH level
+    seed: 17
+
+stage2:
+  min_successes_resolved: 5   # fewer successes than this at current N = curve not yet saturated
+  max_problems_per_benchmark: 12
+
+grading:
+  timeout_seconds: 20
+  workers: 0   # 0 = use cpu_count
+
+paths:
+  runs_root: runs
